@@ -1,144 +1,374 @@
-import streamlit as st
-import pandas as pd
 import os
+from pathlib import Path
+from datetime import datetime
+
+import pandas as pd
+import streamlit as st
+
 from eoi_pdf_extractor import process_batch
 
-# Page setup
+
+# -----------------------------
+# CONFIG
+# -----------------------------
+
 st.set_page_config(
-    page_title="EOI Automation Dashboard",
+    page_title="EOI Dashboard",
     page_icon="📄",
     layout="wide"
 )
 
-# Create folders
-os.makedirs("input_pdfs", exist_ok=True)
-os.makedirs("output", exist_ok=True)
+INPUT_DIR = Path("input_pdfs")
+OUTPUT_DIR = Path("output")
+OUTPUT_FILE = OUTPUT_DIR / "eoi_results.csv"
 
-# Sidebar
-st.sidebar.title("EOI Automation")
-st.sidebar.write("Upload EOI PDFs, extract data, review issues, and download results.")
+INPUT_DIR.mkdir(exist_ok=True)
+OUTPUT_DIR.mkdir(exist_ok=True)
 
-uploaded_files = st.sidebar.file_uploader(
-    "Upload EOI PDF files",
-    type=["pdf"],
-    accept_multiple_files=True
+
+# -----------------------------
+# HELPERS
+# -----------------------------
+
+STATE_ABBR = {
+    "Australian Capital Territory": "ACT",
+    "New South Wales": "NSW",
+    "Victoria": "VIC",
+    "Queensland": "QLD",
+    "South Australia": "SA",
+    "Western Australia": "WA",
+    "Tasmania": "TAS",
+    "Northern Territory": "NT",
+    "Australian Capital Territory (nomination)": "ACT*",
+    "New South Wales (nomination)": "NSW*",
+    "Victoria (nomination)": "VIC*",
+    "Queensland (nomination)": "QLD*",
+    "South Australia (nomination)": "SA*",
+    "Western Australia (nomination)": "WA*",
+    "Tasmania (nomination)": "TAS*",
+    "Northern Territory (nomination)": "NT*",
+}
+
+def abbr_state(value):
+    return STATE_ABBR.get(value, value)
+
+def expiry_status(days):
+    try:
+        days = int(days)
+        if days <= 0:
+            return "EXPIRED"
+        if days <= 90:
+            return f"{days} days"
+        if days <= 180:
+            return f"{days} days"
+        return ""
+    except:
+        return ""
+
+def expiry_group(days):
+    try:
+        days = int(days)
+        if days <= 0:
+            return "Expired"
+        if days <= 90:
+            return "< 90 days"
+        if days <= 180:
+            return "< 180 days"
+        return "OK"
+    except:
+        return "Unknown"
+
+def enrich_df(df):
+    df = df.copy()
+
+    if "state" in df.columns:
+        df["state_short"] = df["state"].apply(abbr_state)
+
+    if "eoi_days_remaining" in df.columns:
+        df["eoi_status"] = df["eoi_days_remaining"].apply(expiry_status)
+        df["eoi_expiry_group"] = df["eoi_days_remaining"].apply(expiry_group)
+
+    if "english_days_remaining" in df.columns:
+        df["english_status"] = df["english_days_remaining"].apply(expiry_status)
+        df["english_expiry_group"] = df["english_days_remaining"].apply(expiry_group)
+
+    return df
+
+
+# -----------------------------
+# HEADER
+# -----------------------------
+
+st.markdown(
+    """
+    <div style="background-color:#ffffff; padding:18px 24px; border-bottom:1px solid #DDE1ED;">
+        <h2 style="margin:0; color:#1C2033;">EOI Client Dashboard</h2>
+        <p style="margin:4px 0 0 0; color:#6B7280;">
+            Success Education & Visa — PDF extraction, review and expiry tracking
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
 )
 
-process_button = st.sidebar.button("Run Extraction")
+st.write("")
 
-# Main title
-st.title("EOI Automation Dashboard")
-st.write("A dashboard for extracting, reviewing, and exporting EOI client data.")
 
-# Top info cards
+# -----------------------------
+# SIDEBAR UPLOAD
+# -----------------------------
+
+with st.sidebar:
+    st.title("EOI Automation")
+
+    uploaded_files = st.file_uploader(
+        "Upload EOI PDFs",
+        type=["pdf"],
+        accept_multiple_files=True
+    )
+
+    run_button = st.button("Run Extraction", type="primary")
+
+    st.divider()
+    st.caption("Upload EOI Details and Points Breakdown PDFs together.")
+
+
+# -----------------------------
+# PROCESS FILES
+# -----------------------------
+
+if uploaded_files and run_button:
+    for old_file in INPUT_DIR.glob("*.pdf"):
+        old_file.unlink()
+
+    for file in uploaded_files:
+        with open(INPUT_DIR / file.name, "wb") as f:
+            f.write(file.getbuffer())
+
+    with st.spinner("Extracting EOI data..."):
+        process_batch(str(INPUT_DIR), str(OUTPUT_FILE))
+
+    st.success("Extraction completed.")
+
+
+# -----------------------------
+# LOAD DATA
+# -----------------------------
+
+if not OUTPUT_FILE.exists():
+    st.info("Upload PDFs from the sidebar and click **Run Extraction**.")
+    st.stop()
+
+df = pd.read_csv(OUTPUT_FILE).fillna("")
+df = enrich_df(df)
+
+
+# -----------------------------
+# METRICS
+# -----------------------------
+
+total_clients = len(df)
+need_review = len(df[df.get("review_flag", "") == "CHECK"]) if "review_flag" in df.columns else 0
+ready_clients = total_clients - need_review
+
+expired_eoi = 0
+urgent_eoi = 0
+
+if "eoi_days_remaining" in df.columns:
+    expired_eoi = len(df[pd.to_numeric(df["eoi_days_remaining"], errors="coerce") <= 0])
+    urgent_eoi = len(df[
+        (pd.to_numeric(df["eoi_days_remaining"], errors="coerce") > 0) &
+        (pd.to_numeric(df["eoi_days_remaining"], errors="coerce") <= 90)
+    ])
+
 col1, col2, col3, col4 = st.columns(4)
 
-with col1:
-    st.metric("Uploaded PDFs", len(uploaded_files) if uploaded_files else 0)
-
-with col2:
-    st.metric("Processed EOIs", 0)
-
-with col3:
-    st.metric("Need Review", 0)
-
-with col4:
-    st.metric("Ready Records", 0)
+col1.metric("Total Clients", total_clients)
+col2.metric("Need Review", need_review)
+col3.metric("Expired EOI", expired_eoi)
+col4.metric("EOI < 90 Days", urgent_eoi)
 
 st.divider()
 
-# Processing section
-if uploaded_files and process_button:
-    # Clear old input files first
-    for old_file in os.listdir("input_pdfs"):
-        if old_file.lower().endswith(".pdf"):
-            os.remove(os.path.join("input_pdfs", old_file))
 
-    # Save uploaded files
-    for file in uploaded_files:
-        file_path = os.path.join("input_pdfs", file.name)
-        with open(file_path, "wb") as f:
-            f.write(file.getbuffer())
+# -----------------------------
+# FILTERS
+# -----------------------------
 
-    with st.spinner("Processing uploaded PDFs..."):
-        output_file = "output/eoi_results.csv"
-        process_batch("input_pdfs", output_file)
+filter_col1, filter_col2, filter_col3, filter_col4, filter_col5 = st.columns(5)
 
-    df = pd.read_csv(output_file)
+with filter_col1:
+    search = st.text_input("Search client / EOI / occupation")
 
-    total_records = len(df)
-    review_records = len(df[df["review_flag"] == "CHECK"]) if "review_flag" in df.columns else 0
-    ready_records = total_records - review_records
+with filter_col2:
+    visa_options = ["All"] + sorted([x for x in df["visa_subclass"].unique() if x]) if "visa_subclass" in df.columns else ["All"]
+    visa_filter = st.selectbox("Visa", visa_options)
 
-    st.success("Extraction completed successfully.")
+with filter_col3:
+    state_col = "state_short" if "state_short" in df.columns else "state"
+    state_options = ["All"] + sorted([x for x in df[state_col].unique() if x]) if state_col in df.columns else ["All"]
+    state_filter = st.selectbox("State", state_options)
 
-    # Dashboard metrics after processing
-    col1, col2, col3, col4 = st.columns(4)
+with filter_col4:
+    flag_filter = st.selectbox("Flag", ["All", "CHECK", "OK"])
 
-    with col1:
-        st.metric("Uploaded PDFs", len(uploaded_files))
+with filter_col5:
+    expiry_filter = st.selectbox("EOI Expiry", ["All", "Expired", "< 90 days", "< 180 days"])
 
-    with col2:
-        st.metric("Processed EOIs", total_records)
 
-    with col3:
-        st.metric("Need Review", review_records)
+filtered = df.copy()
 
-    with col4:
-        st.metric("Ready Records", ready_records)
+if search:
+    search_lower = search.lower()
+    filtered = filtered[
+        filtered.apply(lambda row: search_lower in " ".join(row.astype(str)).lower(), axis=1)
+    ]
 
-    st.divider()
+if visa_filter != "All" and "visa_subclass" in filtered.columns:
+    filtered = filtered[filtered["visa_subclass"] == visa_filter]
 
-    # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "Extracted Data",
-        "Review Required",
-        "Summary",
-        "Download"
+if state_filter != "All" and state_col in filtered.columns:
+    filtered = filtered[filtered[state_col] == state_filter]
+
+if flag_filter == "CHECK" and "review_flag" in filtered.columns:
+    filtered = filtered[filtered["review_flag"] == "CHECK"]
+
+if flag_filter == "OK" and "review_flag" in filtered.columns:
+    filtered = filtered[filtered["review_flag"] != "CHECK"]
+
+if expiry_filter != "All" and "eoi_expiry_group" in filtered.columns:
+    filtered = filtered[filtered["eoi_expiry_group"] == expiry_filter]
+
+
+# -----------------------------
+# TABLE DISPLAY
+# -----------------------------
+
+display_columns = [
+    "client_name",
+    "eoi_id",
+    "visa_subclass",
+    "state_short",
+    "occupation_name",
+    "total_points",
+    "eoi_expiry_date",
+    "eoi_status",
+    "english_test_type",
+    "english_test_date",
+    "english_expiry_date",
+    "english_status",
+    "english_level",
+    "skills_assessment_authority",
+    "skills_assessment_date",
+    "partner_english_test_type",
+    "partner_english_test_date",
+    "partner_english_expiry_date",
+    "partner_english_level",
+    "review_flag",
+]
+
+display_columns = [c for c in display_columns if c in filtered.columns]
+
+st.subheader(f"Showing {len(filtered)} of {len(df)} clients")
+
+def highlight_rows(row):
+    if row.get("review_flag", "") == "CHECK":
+        return ["background-color: #F5F3FF"] * len(row)
+
+    try:
+        days = int(row.get("eoi_days_remaining", ""))
+        if days <= 0:
+            return ["background-color: #FFF0F0"] * len(row)
+        if days <= 90:
+            return ["background-color: #FFF7ED"] * len(row)
+        if days <= 180:
+            return ["background-color: #FFFBEB"] * len(row)
+    except:
+        pass
+
+    return [""] * len(row)
+
+st.dataframe(
+    filtered[display_columns].style.apply(highlight_rows, axis=1),
+    use_container_width=True,
+    height=500
+)
+
+
+# -----------------------------
+# DETAIL VIEW
+# -----------------------------
+
+st.divider()
+st.subheader("Client Detail View")
+
+if len(filtered) > 0 and "client_name" in filtered.columns:
+    selected_client = st.selectbox(
+        "Select a client",
+        filtered["client_name"].astype(str).tolist()
+    )
+
+    selected_row = filtered[filtered["client_name"].astype(str) == selected_client].iloc[0]
+
+    detail_tab1, detail_tab2, detail_tab3, detail_tab4 = st.tabs([
+        "Personal",
+        "EOI & Occupation",
+        "English & Skills",
+        "Points"
     ])
 
-    with tab1:
-        st.subheader("All Extracted Data")
-        st.dataframe(df, use_container_width=True)
+    with detail_tab1:
+        st.write("**Client Name:**", selected_row.get("client_name", ""))
+        st.write("**EOI ID:**", selected_row.get("eoi_id", ""))
+        st.write("**Visa Subclass:**", selected_row.get("visa_subclass", ""))
+        st.write("**State:**", selected_row.get("state", ""))
+        st.write("**Relationship Status:**", selected_row.get("relationship_status", ""))
 
-    with tab2:
-        st.subheader("Records That Need Review")
+    with detail_tab2:
+        st.write("**Initially Submitted:**", selected_row.get("eoi_initial_submitted_on", ""))
+        st.write("**Last Submitted:**", selected_row.get("eoi_last_submitted_on", ""))
+        st.write("**EOI Expiry:**", selected_row.get("eoi_expiry_date", ""))
+        st.write("**EOI Status:**", selected_row.get("eoi_status", ""))
+        st.write("**Occupation:**", selected_row.get("occupation_name", ""))
+        st.write("**ANZSCO Code:**", selected_row.get("anzsco_code", ""))
 
-        if "review_flag" in df.columns:
-            review_df = df[df["review_flag"] == "CHECK"]
-            if len(review_df) > 0:
-                st.warning(f"{len(review_df)} record(s) need manual review.")
-                st.dataframe(review_df, use_container_width=True)
-            else:
-                st.success("No records need review.")
-        else:
-            st.info("No review flag column found.")
+    with detail_tab3:
+        st.write("**English Test:**", selected_row.get("english_test_type", ""))
+        st.write("**English Test Date:**", selected_row.get("english_test_date", ""))
+        st.write("**English Expiry:**", selected_row.get("english_expiry_date", ""))
+        st.write("**English Level:**", selected_row.get("english_level", ""))
+        st.write("**Assessing Authority:**", selected_row.get("skills_assessment_authority", ""))
+        st.write("**Skills Assessment Date:**", selected_row.get("skills_assessment_date", ""))
 
-    with tab3:
-        st.subheader("Extraction Summary")
+    with detail_tab4:
+        points_cols = [
+            "total_points",
+            "age_points",
+            "english_points",
+            "education_points",
+            "aus_work_exp_points",
+            "overseas_work_exp_points",
+            "partner_points",
+            "professional_year_points",
+            "aus_study_points",
+            "state_nomination_points",
+        ]
 
-        st.write("Total records extracted:", total_records)
-        st.write("Records needing review:", review_records)
-        st.write("Ready records:", ready_records)
+        for col in points_cols:
+            if col in selected_row:
+                st.write(f"**{col.replace('_', ' ').title()}:**", selected_row.get(col, ""))
 
-        if "visa_subclass" in df.columns:
-            st.subheader("Visa Subclass Breakdown")
-            st.bar_chart(df["visa_subclass"].value_counts())
 
-        if "state" in df.columns:
-            st.subheader("State Breakdown")
-            st.bar_chart(df["state"].value_counts())
+# -----------------------------
+# DOWNLOAD
+# -----------------------------
 
-    with tab4:
-        st.subheader("Download Results")
+st.divider()
 
-        with open(output_file, "rb") as f:
-            st.download_button(
-                label="Download CSV",
-                data=f,
-                file_name="eoi_results.csv",
-                mime="text/csv"
-            )
-
-else:
-    st.info("Upload EOI PDFs from the sidebar, then click Run Extraction.")
+with open(OUTPUT_FILE, "rb") as f:
+    st.download_button(
+        "Download CSV",
+        f,
+        file_name="eoi_results.csv",
+        mime="text/csv"
+    )
