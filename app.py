@@ -145,8 +145,9 @@ def clear_storage():
     files = supabase.storage.from_("eoi-pdfs").list()
 
     if files:
-        paths = [file["name"] for file in files]
-        supabase.storage.from_("eoi-pdfs").remove(paths)
+        paths = [file["name"] for file in files if file.get("name")]
+        if paths:
+            supabase.storage.from_("eoi-pdfs").remove(paths)
 
 
 def reset_system():
