@@ -137,8 +137,8 @@ def load_uploaded_pdfs():
 
 
 def clear_database():
-    supabase.table("eoi_clients").delete().neq("id", 0).execute()
-    supabase.table("uploaded_pdfs").delete().neq("id", 0).execute()
+    supabase.table("eoi_clients").delete().gte("id", 0).execute()
+    supabase.table("uploaded_pdfs").delete().gte("id", 0).execute()
 
 
 def clear_storage():
@@ -150,8 +150,8 @@ def clear_storage():
 
 
 def reset_system():
-    clear_database()
     clear_storage()
+    clear_database()
 
     for old_file in INPUT_DIR.glob("*.pdf"):
         old_file.unlink()
@@ -159,6 +159,9 @@ def reset_system():
     for old_file in OUTPUT_DIR.glob("*"):
         if old_file.is_file():
             old_file.unlink()
+
+    st.cache_data.clear()
+    st.cache_resource.clear()
 
 
 # -----------------------------
@@ -196,7 +199,8 @@ with st.sidebar:
         if confirm_reset:
             with st.spinner("Clearing all database records and PDFs..."):
                 reset_system()
-            st.success("System reset completed. Please refresh the page.")
+            st.success("System reset completed.")
+            st.rerun()
         else:
             st.warning("Please tick the confirmation box first.")
 
