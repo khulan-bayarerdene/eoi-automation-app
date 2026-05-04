@@ -43,7 +43,39 @@ supabase = get_supabase()
 # -----------------------------
 # SUPABASE FUNCTIONS
 # -----------------------------
+def clean_name(value):
+    value = str(value or "UNKNOWN").upper().strip()
+    value = value.replace("&", "AND")
+    value = value.replace("/", "_")
+    value = value.replace("-", "_")
+    value = value.replace(" ", "_")
+    value = "".join(c for c in value if c.isalnum() or c == "_")
+    while "__" in value:
+        value = value.replace("__", "_")
+    return value.strip("_") or "UNKNOWN"
 
+
+def clean_date(value):
+    try:
+        return datetime.strptime(str(value), "%d/%m/%Y").strftime("%Y%m%d")
+    except:
+        return "UNKNOWNDATE"
+
+
+def build_standard_pdf_name(record, pdf_type):
+    region = clean_name(record.get("state"))
+    subclass = clean_name(record.get("visa_subclass"))
+    client = clean_name(record.get("client_name"))
+    occupation = clean_name(record.get("occupation_name"))
+    eoi_id = clean_name(record.get("eoi_id"))
+
+    first_date = clean_date(record.get("eoi_initial_submitted_on"))
+    last_date = clean_date(record.get("eoi_last_submitted_on"))
+
+    time_part = datetime.utcnow().strftime("%H%M%S")
+
+    return f"{region}_{subclass}_{client}_{occupation}_{eoi_id}_{pdf_type}_{first_date}_{last_date}_{time_part}.pdf"
+    
 def save_records_to_supabase(df):
     saved = 0
     skipped = 0
@@ -78,24 +110,6 @@ def load_records_from_supabase():
 
     return pd.DataFrame(response.data or [])
 
-
-def upload_pdf_to_storage(file):
-    file_bytes = file.getbuffer()
-
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    safe_name = file.name.replace(" ", "_")
-    storage_path = f"{timestamp}_{safe_name}"
-
-    supabase.storage.from_("eoi-pdfs").upload(
-        storage_path,
-        bytes(file_bytes),
-        {
-            "content-type": "application/pdf",
-            "upsert": "true"
-        }
-    )
-
-    return storage_path, file_bytes
 
 
 def save_pdf_record(file_name, storage_path, eoi_id=""):
@@ -198,18 +212,49 @@ if uploaded_files and run_button:
     uploaded_storage_paths = []
 
     for file in uploaded_files:
-        storage_path, file_bytes = upload_pdf_to_storage(file)
-
         local_path = INPUT_DIR / file.name
         with open(local_path, "wb") as f:
-            f.write(file_bytes)
-
-        uploaded_storage_paths.append((file.name, storage_path))
-
+            f.write(file.getbuffer())
+            
     with st.spinner("Extracting PDF data..."):
         process_batch(str(INPUT_DIR), str(OUTPUT_FILE))
 
     extracted_df = pd.read_csv(OUTPUT_FILE).fillna("")
+
+    uploaded_storage_paths = []
+
+# Loop through extracted records and uploaded files
+for i, row in extracted_df.iterrows():
+    if i >= len(uploaded_files):
+        break
+
+    file = uploaded_files[i]
+    file_bytes = file.getbuffer()
+
+    # Detect PDF type
+    file_name_lower = file.name.lower()
+    if "point" in file_name_lower:
+        pdf_type = "POINTS"
+    else:
+        pdf_type = "DETAILS"
+
+    # Build clean filename
+    new_name = build_standard_pdf_name(row, pdf_type)
+
+    # Upload to Supabase Storage
+    supabase.storage.from_("eoi-pdfs").upload(
+        new_name,
+        bytes(file_bytes),
+        {
+            "content-type": "application/pdf",
+            "upsert": "true"
+        }
+    )
+
+    uploaded_storage_paths.append((file.name, new_name))
+
+    # Save record in DB
+    save_pdf_record(file.name, new_name, row.get("eoi_id", ""))
 
     with st.spinner("Saving extracted records to Supabase database..."):
         saved, skipped = save_records_to_supabase(extracted_df)
