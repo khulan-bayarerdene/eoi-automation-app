@@ -206,68 +206,63 @@ with st.sidebar:
 # -----------------------------
 
 if uploaded_files and run_button:
+    # Clear temp folder
     for old_file in INPUT_DIR.glob("*.pdf"):
         old_file.unlink()
 
-    uploaded_storage_paths = []
-
+    # Step 1: Save uploaded PDFs locally
     for file in uploaded_files:
         local_path = INPUT_DIR / file.name
         with open(local_path, "wb") as f:
             f.write(file.getbuffer())
-            
+
+    # Step 2: Extract data
     with st.spinner("Extracting PDF data..."):
         process_batch(str(INPUT_DIR), str(OUTPUT_FILE))
 
     extracted_df = pd.read_csv(OUTPUT_FILE).fillna("")
 
-    uploaded_storage_paths = []
-
-# Loop through extracted records and uploaded files
-for i, row in extracted_df.iterrows():
-    if i >= len(uploaded_files):
-        break
-
-    file = uploaded_files[i]
-    file_bytes = file.getbuffer()
-
-    # Detect PDF type
-    file_name_lower = file.name.lower()
-    if "point" in file_name_lower:
-        pdf_type = "POINTS"
-    else:
-        pdf_type = "DETAILS"
-
-    # Build clean filename
-    new_name = build_standard_pdf_name(row, pdf_type)
-
-    # Upload to Supabase Storage
-    supabase.storage.from_("eoi-pdfs").upload(
-        new_name,
-        bytes(file_bytes),
-        {
-            "content-type": "application/pdf",
-            "upsert": "true"
-        }
-    )
-
-    uploaded_storage_paths.append((file.name, new_name))
-
-    # Save record in DB
-    save_pdf_record(file.name, new_name, row.get("eoi_id", ""))
-
+    # Step 3: Save extracted records
     with st.spinner("Saving extracted records to Supabase database..."):
         saved, skipped = save_records_to_supabase(extracted_df)
 
-    eoi_ids = extracted_df["eoi_id"].dropna().unique().tolist() if "eoi_id" in extracted_df.columns else []
-    linked_eoi = eoi_ids[0] if eoi_ids else ""
+    uploaded_storage_paths = []
 
-    for file_name, storage_path in uploaded_storage_paths:
-        save_pdf_record(file_name, storage_path, linked_eoi)
+    # Step 4: Upload PDFs with STANDARD NAMES
+    for i, row in extracted_df.iterrows():
+        if i >= len(uploaded_files):
+            break
 
-    st.success(f"Saved/updated {saved} record(s). Skipped {skipped} record(s) without EOI ID.")
-    st.info(f"Uploaded {len(uploaded_storage_paths)} PDF(s) to Supabase Storage.")
+        file = uploaded_files[i]
+        file_bytes = file.getbuffer()
 
+        # Detect PDF type
+        file_name_lower = file.name.lower()
+        if "point" in file_name_lower:
+            pdf_type = "POINTS"
+        else:
+            pdf_type = "DETAILS"
+
+        # Build clean filename
+        new_name = build_standard_pdf_name(row, pdf_type)
+
+        # Upload to Supabase Storage
+        supabase.storage.from_("eoi-pdfs").upload(
+            new_name,
+            bytes(file_bytes),
+            {
+                "content-type": "application/pdf",
+                "upsert": "true"
+            }
+        )
+
+        uploaded_storage_paths.append((file.name, new_name))
+
+        # Save PDF record
+        save_pdf_record(file.name, new_name, row.get("eoi_id", ""))
+
+    st.success(f"Saved/updated {saved} record(s). Skipped {skipped} record(s).")
+    st.info(f"Uploaded {len(uploaded_storage_paths)} PDF(s) with clean naming.")
 
 # -----------------------------
 # LOAD DATA
